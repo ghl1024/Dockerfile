@@ -1,0 +1,106 @@
+#安装Harbor需要先安装docker和docker-compose
+yum install -y yum-utils device-mapper-persistent-data lvm2
+
+#配置repository：
+yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+
+#安装最新版本docker-ce
+yum install -y docker-ce
+
+#启动docker:
+systemctl start docker
+systemctl enable docker
+
+#安装docker-compose
+	a.下载二进制文件
+curl -L https://github.com/docker/compose/releases/download/1.16.1/docker-compose-`uname -s`-`uname -m` -o /usr/local/bin/docker-compose
+#如果需要安装其他版本的话，请修改上面命令中的版本号。
+	b.赋予二进制文件可执行权限
+chmod +x /usr/local/bin/docker-compose
+	c.根据自己的情况决定是否安装命令补全功能
+yum install -y bash-completion 
+curl -L https://raw.githubusercontent.com/docker/compose/1.16.1/contrib/completion/bash/docker-compose -o /etc/bash_completion.d/docker-compose
+	d.测试是否安装成功
+docker-compose --version
+
+#安装Harbor
+wget -P /usr/local/src/ https://storage.googleapis.com/harbor-releases/release-1.7.0/harbor-online-installer-v1.7.1.tgz
+cd /usr/local/src/
+tar xf harbor-online-installer-v1.7.1.tgz  -C /usr/local/
+cd /usr/local/harbor/
+cp /usr/local/harbor/harbor.cfg /usr/local/harbor/harbor.cfg.bak
+
+#Harbor的日常运维管理是通过docker-compose来完成的，Harbor本身有多个服务进程，都放在docker容器之中运行，可以通过docker ps或者docker-compose 来查看
+cd /usr/local/harbor/
+docker-compose ps    
+       Name                     Command               State                                Ports                              
+------------------------------------------------------------------------------------------------------------------------------
+harbor-adminserver   /harbor/harbor_adminserver       Up                                                                      
+harbor-db            docker-entrypoint.sh mysqld      Up      3306/tcp                                                        
+harbor-jobservice    /harbor/harbor_jobservice        Up                                                                      
+harbor-log           /bin/sh -c crond && rm -f  ...   Up      127.0.0.1:1514->514/tcp                                         
+harbor-ui            /harbor/harbor_ui                Up                                                                      
+nginx                nginx -g daemon off;             Up      0.0.0.0:443->443/tcp, 0.0.0.0:4443->4443/tcp, 0.0.0.0:80->80/tcp
+registry             /entrypoint.sh serve /etc/ ...   Up      5000/tcp            
+
+#Harbor的启动和停止
+	启动Harbor
+docker-compose start
+	停止Harbor
+docker-comose stop
+	重启Harbor
+docker-compose restart
+	访问测试
+#在浏览器输入172.16.131.110；默认账号密码： admin / Harbor12345
+
+
+#测试上传和下载镜像
+创建/etc/docker/daemon.json文件，在文件中指定仓库地址
+cat > /etc/docker/daemon.json << EOF
+{ "insecure-registries":["http:172.16.131.110"] }
+EOF
+systemctl  restart docker
+
+#创建Dockerfile
+cd /tmp
+vim Dockerfile 
+FROM centos:centos7
+ENV TZ "Asia/Shanghai"
+
+#构建镜像
+cd /tmp
+docker build -t 172.16.131.110/library/centos7 .
+
+#把镜像push到Harbor
+docker login 172.16.131.110
+docker tag centos7 172.16.131.110/library/centos7
+docker push 172.16.131.110/library/centos7
+
+#Harbor配置TLS证书
+	1.修改Harbor配置文件
+cd /usr/local/harbor/
+vim harbor.cfg
+hostname = 172.16.131.110
+ui_url_protocol = https
+ssl_cert = /etc/certs/ca.crt
+ssl_cert_key = /etc/certs/ca.key
+	2.创建自签名证书key文件
+mkdir /etc/certs
+openssl genrsa -out /etc/certs/ca.key 2048 
+	3.创建自签名证书crt文件
+openssl req -x509 -new -nodes -key /etc/certs/ca.key -subj "/CN=172.16.131.110" -days 5000 -out /etc/certs/ca.crt
+	4.开始安装Harbor
+cd /usr/local/harbor/
+./install.sh
+	5.客户端配置
+客户端需要创建证书文件存放的位置，并且把服务端创建的证书拷贝到该目录下，然后重启客户端docker
+mkdir -p /etc/docker/certs.d/172.16.131.110
+把服务端crt证书文件拷贝到客户端，例如我这的客户端为：172.16.131.120
+scp /etc/certs/ca.crt root@客户端地址:/etc/docker/certs.d/客户端地址/
+重启客户端docker
+systemctl restart docker
+	6.测试是否支持https访问
+docker login 172.16.131.110
+Username (admin): admin
+Password: Harbor12345
+Login Succeeded
